@@ -1,6 +1,6 @@
 [package]
 name = "webble"
-version = "0.0.0"
+version = "0.0.1"
 edition = "2024"
 description = "A general purpose async multithreaded runtime for web"
 readme = "README.md"
@@ -9,51 +9,17 @@ license = "MIT OR Apache-2.0"
 keywords = ["async", "runtime", "wasm", "web"]
 
 [dependencies]
-async-channel = "2.5.0"
-async-task = "4.7.1"
-crossbeam-deque = "0.8.6"
+async-channel = "2.5"
+async-task = "4.7"
+crossbeam-deque = "0.8"
 wasm-bindgen = "0.2.123"
 
 [dependencies.web-sys]
-version = "0.3.95"
+version = "0.3.100"
 features = [
-  # "CssStyleDeclaration",
-  # "Document",
-  # "DomRect",
-  # "DomTokenList",
-  # "Element",
-  # "Event",
-  # "FocusEvent",
-  # "HtmlDivElement",
-  # "HtmlDocument",
-  # "HtmlElement",
-  # "HtmlHeadElement",
-  # "HtmlInputElement",
-  # "InputEvent",
-  # "KeyboardEvent",
-  # "Location",
-  # "MessageEvent",
-  # "Navigator",
-  # "Node",
-  # "PointerEvent",
-  # "PopStateEvent",
-  # "ReadableStream",
-  # "ReadableStreamDefaultReader",
-  # "SvgElement",
-  # "Text",
-  # "WebTransport",
-  # "WebTransportBidirectionalStream",
-  # "WebTransportHash",
-  # "WebTransportOptions",
-  # "WebTransportReceiveStream",
-  # "WebTransportSendStream",
-  # "WheelEvent",
-  # "Window",
   "Worker",
   "WorkerOptions",
   "WorkerType",
-  # "WritableStream",
-  # "WritableStreamDefaultWriter",
 ]
 
 [dev-dependencies]
