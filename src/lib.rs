@@ -1,3 +1,4 @@
+#![cfg_attr(target_arch = "wasm32", feature(stdarch_wasm_atomic_wait))]
 #![doc = r#"
 # Webble
 
@@ -11,6 +12,9 @@ pub use pool::*;
 pub mod spawn;
 pub mod state;
 pub mod worker;
+
+#[cfg(test)]
+mod tests;
 
 pub mod prelude {
     pub use crate::exec::*;

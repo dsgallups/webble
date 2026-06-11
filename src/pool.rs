@@ -126,6 +126,18 @@ impl ThreadPool {
         work.spawn(self)
     }
 
+    pub fn spawn_local<F, Fut, T>(&self, make: F) -> WorkerHandle<T>
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: Future<Output = T> + 'static,
+        T: Send + 'static,
+    {
+        // The body lives in the free `place_local` below: it works entirely off the process-global
+        // `STATE` and never reads `self`, so a running task (which only holds a `Context`, not the
+        // pool) can spawn child work through the same path. See `Context::spawn`.
+        self.spawn(make)
+    }
+
     /// Spawn `Send` work onto the work stealing queue.
     ///
     /// Unlike [`ThreadPool::spawn`], if a closure returns a `Future`, that future
@@ -277,7 +289,7 @@ where
 
 /// The number of logical cores available to this context, read from
 /// `navigator.hardwareConcurrency` and clamped to at least 1.
-fn available_parallelism() -> usize {
+pub(crate) fn available_parallelism() -> usize {
     hardware_concurrency().filter(|&n| n > 0).unwrap_or(4)
 }
 
