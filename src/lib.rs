@@ -2,6 +2,8 @@
 #![doc = r#"
 # Webble
 
+:D (module docs wip)
+
 "#]
 
 pub mod exec;
