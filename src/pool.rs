@@ -166,6 +166,40 @@ impl ThreadPool {
     }
 }
 
+#[cfg(test)]
+impl ThreadPool {
+    /// Construct a pool with **no** real Web Workers, for `wasm-bindgen-test`.
+    ///
+    /// Sizes the process-global slots + injector on first use (the count is fixed thereafter, since
+    /// [`STATE`]`.slots` is a `OnceLock` — pass the same `num_workers` in every test), then clears
+    /// all queues and zeroes every load/notify counter so each test starts from a clean executor
+    /// state. Tests drive "virtual worker 0" by hand via `__worker_drain(0)`.
+    ///
+    /// The returned pool owns no workers, so its `Drop` is a no-op (it never triggers
+    /// `shutdown`), keeping `STATE` clean for the next test.
+    pub fn for_test(num_workers: usize) -> Self {
+        let slots: Box<[Slot]> = (0..num_workers).map(|_| Slot::new()).collect();
+        let _ = STATE.slots.set(slots); // honored once; later calls keep the first sizing
+        let _ = STATE.injector.set(Injector::new());
+        STATE.shutdown.store(false, Ordering::Release);
+        for slot in STATE.slots() {
+            slot.incoming.lock().unwrap().clear();
+            slot.ready.lock().unwrap().clear();
+            // Drop any leftover stealable runnables from a prior test (their task allocations leak,
+            // which is fine for a test reset — they are never re-run).
+            while slot.local.0.pop().is_some() {}
+            slot.load.0.store(0, Ordering::Release);
+            slot.notify.0.store(0, Ordering::Release);
+        }
+        // Drain the global injector likewise.
+        while !matches!(STATE.injector().steal(), crossbeam_deque::Steal::Empty) {}
+        STATE.idle.store(0, Ordering::Release);
+        Self {
+            workers: Vec::new(),
+        }
+    }
+}
+
 impl Drop for ThreadPool {
     fn drop(&mut self) {
         if !self.workers.is_empty() {
