@@ -1,6 +1,13 @@
+#![doc = r#"
+# Webble
+
+"#]
+
 pub mod exec;
 pub mod handle;
 pub mod pool;
+#[doc(inline)]
+pub use pool::*;
 pub mod spawn;
 pub mod state;
 pub mod worker;
