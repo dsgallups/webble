@@ -12,6 +12,7 @@ keywords = ["async", "runtime", "wasm", "web"]
 async-channel = "2.5"
 async-task = "4.7"
 crossbeam-deque = "0.8"
+tracing = "0.1.44"
 wasm-bindgen = "0.2.123"
 
 [dependencies.web-sys]

@@ -220,7 +220,7 @@ impl Drop for ThreadPool {
     }
 }
 
-pub(crate) fn place_local<F, Fut, T>(make: F) -> WorkerHandle<T>
+pub fn place_local<F, Fut, T>(make: F) -> WorkerHandle<T>
 where
     F: FnOnce() -> Fut + Send + 'static,
     Fut: Future<Output = T> + 'static,
@@ -249,7 +249,7 @@ where
     WorkerHandle::new(rx)
 }
 
-pub(crate) fn place_stealable<Fut, T>(fut: Fut) -> WorkerHandle<T>
+pub fn place_stealable<Fut, T>(fut: Fut) -> WorkerHandle<T>
 where
     Fut: Future<Output = T> + Send + 'static,
     T: Send + 'static,
