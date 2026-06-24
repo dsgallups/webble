@@ -12,7 +12,18 @@ blocking the main thread or the workers' event loops.
 
 ## Overview
 
-`ThreadPool` spawns one Web Worker per logical core (or a count you choose, up to 32).
+You initialize the runtime with `webble::builder().init()`. Because the scheduling state 
+lives in the WASM module's shared linear memory (every worker sees the same global state), 
+there is exactly one runtime per module — so after `init()` you spawn work through plain 
+**free functions** (`webble::spawn`, `webble::spawn_stealable`, `webble::on_main`) rather 
+than a handle.
+
+The runtime has a single lifecycle, `Uninit → Running → Shutdown`, readable via
+`webble::lifecycle()`. `webble::shutdown()` terminates the workers; calling `init()` again
+**restarts** it (reusing the same worker count). Calling `init()` while already running panics,
+like installing a global logger twice.
+
+`init()` spawns one Web Worker per logical core (or a count you choose, up to 32).
 Each worker runs a tiny JS drain loop that parks in `Atomics.waitAsync`, not a
 blocking wait, so the worker's event loop stays alive and `fetch`, timers, and other JS
 callbacks keep progressing inside your tasks. 
@@ -23,27 +34,33 @@ Work runs on one of two tracks:
 
 | Track | Spawn with | Bounds | Behavior |
 |---|---|---|---|
-| Pinned (local) | [`ThreadPool::spawn`] / [`spawn_local`] | future may be `!Send` (captures must be `Send`) | placed on the least-loaded worker and owned by it forever |
-| Stealable | [`ThreadPool::spawn_stealable`] | future must be `Send` | enters a work-stealing deque; may migrate between workers on every wake |
+| Pinned (local) | [`webble::spawn`] | future may be `!Send` (captures must be `Send`) | placed on the least-loaded worker and owned by it forever |
+| Stealable | [`webble::spawn_stealable`] | future must be `Send` | enters a work-stealing deque; may migrate between workers on every wake |
 
 The pinned track is the right default for I/O and CPU-light workloads, and it lets you
 hold `!Send` values like `Rc` or `JsValue` across `.await` points. The stealable track is
 for CPU-heavy fan-out where load balancing matters. Stealing can be expensive, so defaulting
-to `ThreadPool::spawn` is usually more performant.
+to `webble::spawn` is usually more performant.
+
+The main thread is also a participant: from inside a worker task, [`webble::on_main`] runs a
+closure on the main thread and returns its result, which is the sanctioned path for
+main-thread-only work (DOM, `window`, most `web_sys` APIs).
 
 ## Example
 
 ```rust
-use webble::ThreadPool;
+use webble::Webble;
 
-// Path to your wasm-bindgen JS glue, relative to your server root.
-let pool = ThreadPool::new("/my_app.js")?;
+// Initialize once on the main thread. The path is your wasm-bindgen JS glue,
+// relative to your server root.
+Webble::builder().glue_path("/my_app.js").init()?;
+// (or: Webble::builder().workers(8).glue_path("/my_app.js").init()?;)
 
 // Spawn a closure, which runs to completion on one worker.
-let mut sum = pool.spawn(|| (0..1_000_000u64).sum::<u64>());
+let mut sum = webble::spawn(|| (0..1_000_000u64).sum::<u64>());
 
 // Spawn an async fn. The future is built ON the worker, so it may be !Send:
-let mut greeting = pool.spawn(|| async {
+let mut greeting = webble::spawn(|| async {
     let local = std::rc::Rc::new("hello"); // !Send is fine here
     format!("{local} from worker")
 });
@@ -51,7 +68,7 @@ let mut greeting = pool.spawn(|| async {
 // CPU-heavy workload. spawn a stealable task to balance 
 // the work across all workers.
 let mut handles: Vec<_> = (0..64)
-    .map(|i| pool.spawn_stealable(async move { expensive(i) }))
+    .map(|i| webble::spawn_stealable(async move { expensive(i) }))
     .collect();
 
 // Results arrive through a non-blocking handle. Poll it from your frame
@@ -63,7 +80,14 @@ if let Some(total) = sum.try_recv() {
 
 `spawn` returns a [`WorkerHandle<T>`]. It is intentionally not a `Future` you block on —
 the main thread must never block in the browser. Check it with `try_recv()` /
-`check_release()`, or take ownership of the result with `into_inner()`.
+`check_release()`, or take ownership of the result with `into_inner()`. From *inside* a
+spawned task (where awaiting is fine), you can instead `.recv().await` the handle — this is
+how you read an `on_main` result from a worker:
+
+```rust
+// running inside a worker task:
+let id = webble::on_main(|| async { /* DOM work on main */ 42 }).recv().await;
+```
 
 ## Requirements
 
@@ -115,10 +139,10 @@ Cross-Origin-Embedder-Policy: <choose require-corp or credentialless>
 ```
 
 ### Notes
-No separate worker script is needed: the pool generates one as a blob URL at runtime. The
-generated script imports your wasm-bindgen glue, which is why `ThreadPool::new` takes the
-URL path to it (e.g. `ThreadPool::new("/my_app.js")`). If you'd rather serve your own
-worker script, use `ThreadPool::new_from_absolute_url_and_count`.
+No separate worker script is needed: the runtime generates one as a blob URL at runtime. The
+generated script imports your wasm-bindgen glue, which is why `glue_path` takes the
+URL path to it (e.g. `Webble::builder().glue_path("/my_app.js")`). If you'd rather serve your
+own worker script, use `Webble::builder().worker_url(absolute_url)`.
 
 ## Questions
 Feel free to DM me on discord if you have problems setting it up. my handle is `dsgallups`.

@@ -1,22 +1,47 @@
 use std::collections::VecDeque;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use crossbeam_deque::{Injector, Stealer, Worker};
+use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 
 /// Lives in our WASM linear memory (a `SharedArrayBuffer` when compiled with `+atomics`),
 /// so every worker sees this struct.
 pub(crate) static STATE: SharedState = SharedState {
     slots: OnceLock::new(),
+    main_slot: OnceLock::new(),
     injector: OnceLock::new(),
     idle: AtomicU32::new(0),
-    shutdown: AtomicBool::new(false),
+    state: AtomicU8::new(Lifecycle::Uninit as u8),
 };
 
+/// The runtime's lifecycle.
+///
+/// `Uninit → Running` on [`init`](crate::WebbleBuilder::init), `Running → Shutdown` on
+/// [`shutdown`](crate::shutdown), and `Shutdown → Running` again on a fresh `init`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+pub enum Lifecycle {
+    /// Never initialized (or reset). No workers exist.
+    Uninit = 0,
+    /// `init` succeeded; workers are live and accepting work.
+    Running = 1,
+    /// `shutdown` was called; workers are terminated. A fresh `init` restarts the runtime.
+    Shutdown = 2,
+}
+
+/// Sentinel worker id for the **main thread**. The main thread participates on the pinned
+/// track only (it runs `on_main` closures), so it is addressed through [`SharedState::main_slot`]
+/// rather than the `slots` array. Chosen as `u32::MAX` so it can never collide with a real worker
+/// index (capped at 32).
+pub const MAIN_ID: u32 = u32::MAX;
+
 pub struct SharedState {
-    /// Per-worker slots. It's sized a single time in `ThreadPool::new`.
+    /// Per-worker slots. It's sized a single time in `Webble::builder().init()`.
     pub slots: OnceLock<Box<[Slot]>>,
+    /// The main thread's pinned-track slot. Kept separate from `slots` so worker-only machinery
+    /// (`pick_worker`, the steal loops, the 32-bit idle bitmask) never has to special-case it.
+    /// Addressed via [`MAIN_ID`].
+    pub main_slot: OnceLock<Slot>,
     /// The global injector for stealable work produced off a worker,
     /// and the fallback a worker drains when its own deque and its siblings'
     /// are empty. Sized alongside `slots`.
@@ -27,7 +52,9 @@ pub struct SharedState {
     /// will wake a single parked worker (claiming its bit). Supports
     /// up to 32 workers. See `__worker_drain` to see checks on a lost-wakeup race.
     pub idle: AtomicU32,
-    pub shutdown: AtomicBool,
+    /// The runtime [`Lifecycle`], stored as its `u8` discriminant. Drives the double-init guard, the
+    /// worker/main drain stop signal, and restart.
+    pub state: AtomicU8,
 }
 
 impl SharedState {
@@ -36,12 +63,60 @@ impl SharedState {
         self.slots.get().expect("thread pool not initialized")
     }
 
+    /// The current [`Lifecycle`] state.
+    pub fn lifecycle(&self) -> Lifecycle {
+        match self.state.load(Ordering::Acquire) {
+            0 => Lifecycle::Uninit,
+            1 => Lifecycle::Running,
+            _ => Lifecycle::Shutdown,
+        }
+    }
+
+    /// Whether the runtime is shutting down. The worker and main drain loops poll this to stop.
+    pub fn is_shutdown(&self) -> bool {
+        self.state.load(Ordering::Acquire) == Lifecycle::Shutdown as u8
+    }
+
     /// The global stealable injector. Panics if the pool has not been initialized.
     pub fn injector(&'static self) -> &'static Injector<StealPtr> {
         self.injector.get().expect("thread pool not initialized")
     }
+
+    /// Resolve a worker id (or [`MAIN_ID`]) to its scheduling slot. The futex wake path
+    /// (`notify_worker`, `__notify_index`) routes through here so the main thread is woken
+    /// exactly like a worker.
+    pub fn slot_for(&'static self, id: u32) -> &'static Slot {
+        if id == MAIN_ID {
+            self.main_slot.get().expect("main slot not initialized")
+        } else {
+            &self.slots()[id as usize]
+        }
+    }
 }
 
+/// Clear all per-slot queues/counters, the main slot, the global injector, and the idle bitmask,
+/// returning the executor to a pristine state.
+///
+/// Used by a restart (reusing the existing `OnceLock` slots) and by the test harness. Any leftover
+/// `async_task` allocations are leaked, which is fine(?) here. They are never re-run.
+pub(crate) fn clear_runtime_state() {
+    for slot in STATE.slots() {
+        slot.incoming.lock().unwrap().clear();
+        slot.ready.lock().unwrap().clear();
+        while slot.local.0.pop().is_some() {}
+        slot.load.0.store(0, Ordering::Release);
+        slot.notify.0.store(0, Ordering::Release);
+        slot.busy.0.store(false, Ordering::Release);
+    }
+    let main = STATE.slot_for(MAIN_ID);
+    main.incoming.lock().unwrap().clear();
+    main.ready.lock().unwrap().clear();
+    while main.local.0.pop().is_some() {}
+    main.load.0.store(0, Ordering::Release);
+    main.notify.0.store(0, Ordering::Release);
+    while !matches!(STATE.injector().steal(), Steal::Empty) {}
+    STATE.idle.store(0, Ordering::Release);
+}
 /// a 64-byte aligned wrapper to keep per-worker atomics off each other's cache lines.
 #[repr(align(64))]
 pub struct Padded<T>(pub T);
@@ -60,7 +135,7 @@ pub struct PinnedPtr(pub u32);
 pub struct StealPtr(pub u32);
 
 /// The owner half of a worker's stealable deque.
-pub(crate) struct LocalDeque(pub Worker<StealPtr>);
+pub struct LocalDeque(pub Worker<StealPtr>);
 
 /// SAFETY:
 ///
@@ -105,12 +180,12 @@ impl PendingSpawn {
 /// that instantiates the same module+memory sees the same slots at stable addresses.
 pub struct Slot {
     /// Pinned work placed on this worker, not yet spawned.
-    pub(crate) incoming: Mutex<VecDeque<PendingSpawn>>,
+    pub incoming: Mutex<VecDeque<PendingSpawn>>,
     /// Woken `Runnable<u32>` raw pointers handed back from another worker (cross-worker wake cold path).
-    pub(crate) ready: Mutex<VecDeque<PinnedPtr>>,
+    pub ready: Mutex<VecDeque<PinnedPtr>>,
     /// Owner half of this worker's stealable deque. Pushed/popped only by this worker. other workers
     /// steal this through [`Slot::stealer`]. See [`LocalDeque`].
-    pub(crate) local: LocalDeque,
+    pub local: LocalDeque,
     /// Steal half of this worker's stealable deque. Shared: any worker may steal from it.
     pub stealer: Stealer<StealPtr>,
     /// Number of live **pinned** futures owned by this worker. It serves as the least-loaded
@@ -120,11 +195,17 @@ pub struct Slot {
     pub load: Padded<AtomicU32>,
     /// `Atomics.waitAsync` futex word. Producers bump it then `memory.atomic.notify`.
     pub notify: Padded<AtomicU32>,
+    /// `true` while this worker is inside `__worker_drain` actively touching the shared deques, and
+    /// `false` at a safe point (parked, or stopped on shutdown). [`shutdown`](crate::shutdown) waits
+    /// for every slot to read `false` before calling `Worker.terminate()`, so a worker is never
+    /// killed mid-deque-op (which would corrupt the shared work-stealing structures, reused across
+    /// restarts). See the Dekker handshake in `__worker_drain` / `shutdown`.
+    pub busy: Padded<AtomicBool>,
 }
 
 impl Slot {
     /// Build a fresh slot. Not `const`: `crossbeam_deque::Worker::new_lifo()` allocates. Slots are
-    /// only ever constructed at runtime (in `ThreadPool::new`/`for_test`), so this is fine.
+    /// only ever constructed at runtime (in `WebbleBuilder::init`/`test_reset`), so this is fine.
     pub fn new() -> Self {
         let local = Worker::new_lifo();
         let stealer = local.stealer();
@@ -135,6 +216,7 @@ impl Slot {
             stealer,
             load: Padded(AtomicU32::new(0)),
             notify: Padded(AtomicU32::new(0)),
+            busy: Padded(AtomicBool::new(false)),
         }
     }
 }

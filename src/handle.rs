@@ -30,4 +30,18 @@ impl<T> WorkerHandle<T> {
         }
         self.result
     }
+
+    /// Await the result, returning `None` if the task is dropped before producing one.
+    ///
+    /// This is a normal cooperative `async` await — it never blocks a thread — so it is safe in any
+    /// async context: inside a webble task, or in a main-thread future driven by an executor such
+    /// as `wasm_bindgen_futures::spawn_local`. In the main thread's *synchronous* frame loop, where
+    /// you cannot `.await`, poll [`try_recv`](Self::try_recv) / [`check_release`](Self::check_release)
+    /// instead.
+    pub async fn recv(mut self) -> Option<T> {
+        if let Some(value) = self.result.take() {
+            return Some(value);
+        }
+        self.rx.recv().await.ok()
+    }
 }

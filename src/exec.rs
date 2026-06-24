@@ -29,7 +29,7 @@ thread_local! {
 /// Wake the worker `id` if it is parked in `Atomics.waitAsync` on its notify word. Producers MUST
 /// push their work to the queue BEFORE calling this.
 pub fn notify_worker(id: u32) {
-    let slot = &STATE.slots()[id as usize];
+    let slot = STATE.slot_for(id);
     slot.notify.0.fetch_add(1, Ordering::Release);
     let _addr = &slot.notify.0 as *const AtomicU32 as *mut i32;
 
@@ -43,7 +43,7 @@ pub fn notify_worker(id: u32) {
 /// The `Int32Array` word index of worker `id`'s notify futex, for JS `Atomics.waitAsync`.
 #[wasm_bindgen]
 pub fn __notify_index(id: u32) -> u32 {
-    let slot = &STATE.slots()[id as usize];
+    let slot = STATE.slot_for(id);
     let addr = (&slot.notify.0 as *const AtomicU32).expose_provenance();
     (addr / 4) as u32
 }
@@ -123,13 +123,18 @@ pub fn run_steal_ptr(ptr: StealPtr) {
 pub fn schedule(runnable: Run) {
     let owner = *runnable.metadata();
     let ptr = PinnedPtr(runnable.into_raw().as_ptr().expose_provenance() as u32);
-    if thread_id() == Some(owner) {
-        // Hot path: woken on the owner (e.g. a WebTransport JS callback). Run locally.
+    if current_raw() == Some(owner) {
+        // Hot path: woken on the owner (a worker, or the main thread for an `on_main` task). Run
+        // locally on the owner's microtask queue.
         push_microtask(ptr);
     } else {
         // Cold path: woken from another worker (e.g. a cross-worker channel send). Hand the
-        // Runnable back to the owner — it is the only worker allowed to poll this future.
-        STATE.slots()[owner as usize]
+        // Runnable back to the owner — it is the only worker allowed to poll this future. Routed
+        // through `slot_for` so a task owned by the main thread (`owner == MAIN_ID`, the case for
+        // every `on_main` task, since the main thread keeps `thread_id() == None`) lands in the
+        // main slot instead of indexing the worker array out of bounds.
+        STATE
+            .slot_for(owner)
             .ready
             .lock()
             .unwrap()
@@ -146,9 +151,12 @@ pub fn schedule(runnable: Run) {
 /// Any worker may then pop and poll it. must also be a plain `fn` (Send + Sync + 'static).
 pub fn schedule_stealable(runnable: Steal) {
     let ptr = StealPtr(runnable.into_raw().as_ptr().expose_provenance() as u32);
-    match thread_id() {
-        Some(id) => STATE.slots()[id as usize].local.0.push(ptr),
-        None => STATE.injector().push(ptr),
+    match current_raw() {
+        // On a worker: push to its local deque for locality. On the main thread (`MAIN_ID`) or
+        // off-runtime: push to the global injector — the main thread has no stealable deque of its
+        // own (it never runs stealable work), and its `local` half is never stolen from.
+        Some(id) if id != MAIN_ID => STATE.slots()[id as usize].local.0.push(ptr),
+        _ => STATE.injector().push(ptr),
     }
     // Order the push BEFORE reading the idle set. Paired with the worker's
     // set-idle-then-recheck in `__worker_drain` (a Dekker handshake over the `idle` bitmask and

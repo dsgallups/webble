@@ -8,7 +8,6 @@ use wasm_bindgen_test::*;
 use web_sys::js_sys;
 
 use crate::exec::{__notify_index, notify_worker};
-use crate::pool::ThreadPool;
 use crate::state::STATE;
 use crate::tests::{
     N, YieldNow, flush_microtasks, memory_words, recv, recv_stealable, set_timeout,
@@ -17,7 +16,7 @@ use crate::worker::__worker_drain;
 
 #[wasm_bindgen_test]
 fn notify_index_is_distinct_per_worker() {
-    let _pool = ThreadPool::for_test(N);
+    super::test_reset(N);
     let mut seen = std::collections::HashSet::new();
     for id in 0..N as u32 {
         let idx = __notify_index(id);
@@ -34,7 +33,7 @@ fn notify_index_is_distinct_per_worker() {
 
 #[wasm_bindgen_test]
 fn notify_worker_bumps_its_own_word() {
-    let _pool = ThreadPool::for_test(N);
+    super::test_reset(N);
     let arr = memory_words();
 
     let idx2 = __notify_index(2);
@@ -64,14 +63,14 @@ fn available_parallelism_is_positive() {
 
 #[wasm_bindgen_test]
 fn places_on_least_loaded_worker() {
-    let pool = ThreadPool::for_test(N);
+    super::test_reset(N);
     let slots = STATE.slots();
     slots[0].load.0.store(5, Ordering::Release);
     slots[1].load.0.store(2, Ordering::Release);
     slots[2].load.0.store(9, Ordering::Release);
     slots[3].load.0.store(7, Ordering::Release);
 
-    let _h = pool.spawn_local(|| async { 0u8 });
+    let _h = crate::place_local(|| async { 0u8 });
 
     assert_eq!(
         slots[1].incoming.lock().unwrap().len(),
@@ -89,25 +88,25 @@ fn places_on_least_loaded_worker() {
 
 #[wasm_bindgen_test]
 fn num_tasks_waiting_counts_pending_placements() {
-    let pool = ThreadPool::for_test(N);
-    assert_eq!(pool.num_tasks_waiting(), 0);
-    let _a = pool.spawn_local(|| async { 1u8 });
-    let _b = pool.spawn_local(|| async { 2u8 });
-    assert_eq!(pool.num_tasks_waiting(), 2);
+    super::test_reset(N);
+    assert_eq!(crate::num_tasks_waiting(), 0);
+    let _a = crate::place_local(|| async { 1u8 });
+    let _b = crate::place_local(|| async { 2u8 });
+    assert_eq!(crate::num_tasks_waiting(), 2);
 }
 
 #[wasm_bindgen_test]
 async fn delivers_immediate_result() {
-    let pool = ThreadPool::for_test(N);
-    let h = pool.spawn_local(|| async { 41u32 + 1 });
+    super::test_reset(N);
+    let h = crate::place_local(|| async { 41u32 + 1 });
     __worker_drain(0);
     assert_eq!(recv(h).await, 42);
 }
 
 #[wasm_bindgen_test]
 async fn yielding_future_completes_via_microtasks() {
-    let pool = ThreadPool::for_test(N);
-    let h = pool.spawn_local(|| async {
+    super::test_reset(N);
+    let h = crate::place_local(|| async {
         YieldNow::new().await;
         YieldNow::new().await;
         7u32
@@ -118,8 +117,8 @@ async fn yielding_future_completes_via_microtasks() {
 
 #[wasm_bindgen_test]
 async fn non_send_value_held_across_await() {
-    let pool = ThreadPool::for_test(N);
-    let h = pool.spawn_local(|| async {
+    super::test_reset(N);
+    let h = crate::place_local(|| async {
         let local = Rc::new(20u32);
         YieldNow::new().await;
         *local + 1
@@ -130,7 +129,7 @@ async fn non_send_value_held_across_await() {
 
 #[wasm_bindgen_test]
 async fn many_futures_run_concurrently_on_one_worker() {
-    let pool = ThreadPool::for_test(N);
+    super::test_reset(N);
     let slots = STATE.slots();
     // Make every other worker look busy so all placements pick worker 0.
     for i in 1..N {
@@ -139,7 +138,7 @@ async fn many_futures_run_concurrently_on_one_worker() {
 
     let mut handles = Vec::new();
     for n in 0..8u32 {
-        handles.push(pool.spawn_local(move || async move {
+        handles.push(crate::place_local(move || async move {
             YieldNow::new().await;
             n * 2
         }));
@@ -163,8 +162,8 @@ async fn many_futures_run_concurrently_on_one_worker() {
 
 #[wasm_bindgen_test]
 async fn load_returns_to_zero_after_completion() {
-    let pool = ThreadPool::for_test(N);
-    let h = pool.spawn_local(|| async {
+    super::test_reset(N);
+    let h = crate::place_local(|| async {
         YieldNow::new().await;
         0u8
     });
@@ -174,7 +173,7 @@ async fn load_returns_to_zero_after_completion() {
         "placement should reserve load up front"
     );
     __worker_drain(0);
-    let _ = recv(h).await;
+    _ = recv(h).await;
     assert_eq!(
         STATE.slots()[0].load.0.load(Ordering::Relaxed),
         0,
@@ -184,10 +183,10 @@ async fn load_returns_to_zero_after_completion() {
 
 #[wasm_bindgen_test]
 async fn dropping_handle_does_not_cancel() {
-    let pool = ThreadPool::for_test(N);
+    super::test_reset(N);
     let flag = Arc::new(AtomicBool::new(false));
     let f = flag.clone();
-    let h = pool.spawn_local(move || async move {
+    let h = crate::place_local(move || async move {
         YieldNow::new().await;
         f.store(true, Ordering::SeqCst);
     });
@@ -208,15 +207,15 @@ async fn dropping_handle_does_not_cancel() {
 
 #[wasm_bindgen_test]
 async fn stealable_delivers_immediate_result() {
-    let pool = ThreadPool::for_test(N);
-    let h = pool.spawn_stealable(async { 41u32 + 1 });
+    super::test_reset(N);
+    let h = crate::spawn_stealable(async { 41u32 + 1 });
     assert_eq!(recv_stealable(h).await, 42);
 }
 
 #[wasm_bindgen_test]
 async fn stealable_yielding_future_completes_via_drains() {
-    let pool = ThreadPool::for_test(N);
-    let h = pool.spawn_stealable(async {
+    super::test_reset(N);
+    let h = crate::spawn_stealable(async {
         YieldNow::new().await;
         YieldNow::new().await;
         7u32
@@ -226,19 +225,19 @@ async fn stealable_yielding_future_completes_via_drains() {
 
 #[wasm_bindgen_test]
 async fn stealable_enqueues_until_drained() {
-    let pool = ThreadPool::for_test(N);
-    assert_eq!(pool.num_tasks_waiting(), 0);
+    super::test_reset(N);
+    assert_eq!(crate::num_tasks_waiting(), 0);
 
-    let h = pool.spawn_stealable(async { 5u8 });
+    let h = crate::spawn_stealable(async { 5u8 });
     assert_eq!(
-        pool.num_tasks_waiting(),
+        crate::num_tasks_waiting(),
         1,
         "a freshly spawned stealable task waits in the injector"
     );
 
     assert_eq!(recv_stealable(h).await, 5);
     assert_eq!(
-        pool.num_tasks_waiting(),
+        crate::num_tasks_waiting(),
         0,
         "draining claims and completes it, emptying the queue"
     );
@@ -246,7 +245,7 @@ async fn stealable_enqueues_until_drained() {
 
 #[wasm_bindgen_test]
 fn drain_marks_worker_idle_when_no_stealable_work() {
-    let _pool = ThreadPool::for_test(N);
+    super::test_reset(N);
     __worker_drain(0);
     assert_eq!(
         STATE.idle.load(Ordering::SeqCst) & 1,
@@ -257,7 +256,7 @@ fn drain_marks_worker_idle_when_no_stealable_work() {
 
 #[wasm_bindgen_test]
 fn schedule_stealable_wakes_exactly_one_idle_worker() {
-    let pool = ThreadPool::for_test(N);
+    super::test_reset(N);
     let arr = memory_words();
     // workers 1, 2, 3 parked
     STATE.idle.store(0b1110, Ordering::SeqCst);
@@ -265,7 +264,7 @@ fn schedule_stealable_wakes_exactly_one_idle_worker() {
     let words = |i: u32| js_sys::Atomics::load(&arr, __notify_index(i)).unwrap();
     let before: Vec<i32> = (0..N as u32).map(words).collect();
 
-    let _h = pool.spawn_stealable(async { 7u8 });
+    let _h = crate::spawn_stealable(async { 7u8 });
 
     let bumped: Vec<u32> = (0..N as u32)
         .filter(|&i| words(i) == before[i as usize] + 1)
@@ -289,7 +288,7 @@ fn schedule_stealable_wakes_exactly_one_idle_worker() {
 
 #[wasm_bindgen_test]
 fn schedule_stealable_with_no_idle_workers_wakes_none() {
-    let pool = ThreadPool::for_test(N);
+    super::test_reset(N);
     let arr = memory_words();
     // nobody parked
     STATE.idle.store(0, Ordering::SeqCst);
@@ -297,7 +296,7 @@ fn schedule_stealable_with_no_idle_workers_wakes_none() {
     let words = |i: u32| js_sys::Atomics::load(&arr, __notify_index(i)).unwrap();
     let before: Vec<i32> = (0..N as u32).map(words).collect();
 
-    let _h = pool.spawn_stealable(async { 1u8 });
+    let _h = crate::spawn_stealable(async { 1u8 });
 
     assert!(
         (0..N as u32).all(|i| words(i) == before[i as usize]),
@@ -307,7 +306,7 @@ fn schedule_stealable_with_no_idle_workers_wakes_none() {
 
 #[wasm_bindgen_test]
 async fn waitasync_is_woken_by_notify_worker() {
-    let _pool = ThreadPool::for_test(N);
+    super::test_reset(N);
     let arr = memory_words();
     let idx = __notify_index(1);
     let seen = js_sys::Atomics::load(&arr, idx).unwrap();
