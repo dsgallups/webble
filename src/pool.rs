@@ -176,6 +176,29 @@ impl ThreadPool {
     pub fn is_shutdown(&self) -> bool {
         STATE.shutdown.load(Ordering::Relaxed)
     }
+
+    // /// You should probably use `spawn_local` over this function.
+    // ///
+    // /// This is monomorphizedish `spawn_local`
+    // pub fn place_local<F, Fut, T>(&self, make: F) -> WorkerHandle<T>
+    // where
+    //     F: FnOnce() -> Fut + Send + 'static,
+    //     Fut: Future<Output = T> + 'static,
+    //     T: Send + 'static,
+    // {
+    //     place_local(make)
+    // }
+
+    // /// You should probably use `spawn_stealable` over this function.
+    // ///
+    // /// This is monomorphizedish `spawn_stealable`
+    // pub fn place_stealable<Fut, T>(&self, fut: Fut) -> WorkerHandle<T>
+    // where
+    //     Fut: Future<Output = T> + Send + 'static,
+    //     T: Send + 'static,
+    // {
+    //     place_stealable(fut)
+    // }
 }
 
 #[cfg(test)]

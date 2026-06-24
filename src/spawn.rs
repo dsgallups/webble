@@ -16,7 +16,7 @@ where
 {
     type Output = WorkerHandle<T>;
     fn spawn(self, _: &ThreadPool) -> WorkerHandle<T> {
-        pool::place_local(move || async move { self() })
+        crate::place_local(move || async move { self() })
     }
 }
 
@@ -27,7 +27,7 @@ where
 {
     type Output = WorkerHandle<T>;
     fn spawn(self, _: &ThreadPool) -> WorkerHandle<T> {
-        pool::place_local(move || self)
+        crate::place_local(move || self)
     }
 }
 
@@ -39,7 +39,7 @@ where
 {
     type Output = WorkerHandle<T>;
     fn spawn(self, _: &ThreadPool) -> Self::Output {
-        pool::place_local(self)
+        crate::place_local(self)
     }
 }
 
@@ -55,6 +55,6 @@ where
 {
     type Output = WorkerHandle<T>;
     fn spawn_stealable(self, _: &ThreadPool) -> WorkerHandle<T> {
-        pool::place_stealable(self)
+        crate::place_stealable(self)
     }
 }
