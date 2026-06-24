@@ -1,7 +1,9 @@
 use std::cell::RefCell;
 
-use wasm_bindgen::{JsCast, JsValue, prelude::Closure};
-use web_sys::js_sys;
+use web_sys::{
+    js_sys,
+    wasm_bindgen::{JsCast, JsValue, prelude::Closure},
+};
 
 use crate::{
     exec::{__notify_index, run_runnable_ptr},
@@ -19,7 +21,7 @@ thread_local! {
 /// `Int32Array` over the current shared wasm memory. Rebuilt each call because a `memory.grow` can
 /// replace the underlying buffer.
 fn main_words() -> js_sys::Int32Array {
-    let mem = wasm_bindgen::memory().unchecked_into::<js_sys::WebAssembly::Memory>();
+    let mem = web_sys::wasm_bindgen::memory().unchecked_into::<js_sys::WebAssembly::Memory>();
     js_sys::Int32Array::new(&mem.buffer())
 }
 

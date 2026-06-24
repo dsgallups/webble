@@ -133,12 +133,7 @@ pub fn schedule(runnable: Run) {
         // through `slot_for` so a task owned by the main thread (`owner == MAIN_ID`, the case for
         // every `on_main` task, since the main thread keeps `thread_id() == None`) lands in the
         // main slot instead of indexing the worker array out of bounds.
-        STATE
-            .slot_for(owner)
-            .ready
-            .lock()
-            .unwrap()
-            .push_back(ptr);
+        STATE.slot_for(owner).ready.lock().unwrap().push_back(ptr);
         notify_worker(owner);
     }
 }
