@@ -59,8 +59,7 @@ enum WorkerSource {
     WorkerUrl(String),
 }
 
-/// Entry point for configuring and starting the global runtime, in the spirit of
-/// `tracing_subscriber::fmt()`.
+/// Entry point for configuring and starting the global runtime
 ///
 /// ```no_run
 /// webble::builder().workers(8).glue_path("/app.js").init().unwrap();
@@ -298,6 +297,38 @@ pub fn num_tasks_waiting() -> usize {
     let pinned: usize = slots.iter().map(|s| s.incoming.lock().unwrap().len()).sum();
     let stealable: usize = slots.iter().map(|s| s.stealer.len()).sum();
     pinned + stealable + STATE.injector().len()
+}
+
+/// A per-worker snapshot of live **pinned** load: entry `i` is the number of pinned futures
+/// currently owned by worker `i` (the same metric used for least-loaded placement). Returns an
+/// empty `Vec` when the runtime is not [`Running`](Lifecycle::Running).
+///
+/// This is a best-effort, racy read intended for introspection and visualization, not scheduling.
+#[cfg(feature = "debug")]
+pub fn worker_loads() -> Vec<u32> {
+    if STATE.lifecycle() != Lifecycle::Running {
+        return Vec::new();
+    }
+    STATE
+        .slots
+        .get()
+        .map(|slots| {
+            slots
+                .iter()
+                .map(|s| s.load.0.load(Ordering::Relaxed))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// A snapshot of the parked-worker bitmask: bit `i` is set when worker `i` is idle in
+/// `Atomics.waitAsync`, waiting for a notify. Supports up to 32 workers.
+///
+/// Best-effort and racy: a worker may park or wake the instant after you read it. For
+/// introspection/visualization only.
+#[cfg(feature = "debug")]
+pub fn idle_snapshot() -> u32 {
+    STATE.idle.load(Ordering::Relaxed)
 }
 
 /// The current runtime [`Lifecycle`].
