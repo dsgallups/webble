@@ -1,7 +1,5 @@
-use std::sync::{
-    OnceLock,
-    atomic::{Ordering, fence},
-};
+use std::cell::Cell;
+use std::sync::atomic::{Ordering, fence};
 
 use crossbeam_deque::Steal;
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -12,12 +10,39 @@ use crate::{
     state::{STATE, Slot, StealPtr},
 };
 
-thread_local! {
-    pub static THREAD_ID: OnceLock<u32> = const { OnceLock::new() };
+/// The runtime thread the current code is running on.
+///
+/// Every thread that participates in the runtime has an identity: the [`Main`](ThreadId::Main) thread
+/// (the one that called `init`, which runs [`on_main`](crate::on_main) work) and each
+/// [`Worker`](ThreadId::Worker). [`thread_id`] returns `None` only for a thread that is *not*
+/// part of the runtime at all — e.g. before `init`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum ThreadId {
+    /// The main thread.
+    Main,
+    /// Worker number `0..num_workers`.
+    Worker(u32),
 }
 
-pub fn thread_id() -> Option<u32> {
-    THREAD_ID.with(|v| v.get().copied())
+thread_local! {
+    static THREAD: Cell<Option<ThreadId>> = const { Cell::new(None) };
+}
+
+/// Record the identity of the current runtime thread. Called on each drain entry — `__worker_drain`
+/// for a worker, `start_main_loop` for main.
+///
+/// In production, a thread is only ever one identity, so this is idempotent.
+///
+/// However, the test harness reuses the main thread as virtual worker 0 by relabelling it here,
+/// which is why it overwrites rather than writing once.
+pub(crate) fn set_thread_id(thread: ThreadId) {
+    THREAD.with(|v| v.set(Some(thread)));
+}
+
+/// The current runtime thread, or `None` if this thread is not part of the runtime (e.g. before
+/// `init`, or a thread that is neither a webble worker nor the `init` caller).
+pub fn thread_id() -> Option<ThreadId> {
+    THREAD.with(|v| v.get())
 }
 
 pub struct ThreadWorker {
@@ -52,16 +77,28 @@ impl ThreadWorker {
 /// **NEVER** call this from the main thread.
 #[wasm_bindgen]
 pub fn __worker_drain(worker_id: u32) -> bool {
-    THREAD_ID.with(|v| {
-        let _ = v.set(worker_id);
-    });
+    let thread_id = ThreadId::Worker(worker_id);
+    set_thread_id(thread_id);
 
-    if STATE.shutdown.load(Ordering::Acquire) {
+    if STATE.is_shutdown() {
         return false;
     }
 
     let slots = STATE.slots();
     let slot = &slots[worker_id as usize];
+
+    // Quiescence handshake with `shutdown()`. Mark ourselves busy BEFORE touching the shared
+    // deques, then re-check shutdown. The `SeqCst` fence pairs with `shutdown`'s store-Shutdown-
+    // then-read-busy: by the single total order, either we observe the shutdown here (and bail
+    // without touching the deques) or `shutdown` observes our `busy` flag (and waits for us to
+    // reach a safe point). This is what stops `Worker.terminate()` from killing us mid-deque-op and
+    // corrupting the shared work-stealing structures, which are reused across restarts.
+    slot.busy.0.store(true, Ordering::SeqCst);
+    fence(Ordering::SeqCst);
+    if STATE.is_shutdown() {
+        slot.busy.0.store(false, Ordering::SeqCst);
+        return false;
+    }
 
     // We are actively draining now and not parekd. Drop ourselves
     // from the idle set so a stealable producer's `wake_one` doesn't waste
@@ -109,8 +146,12 @@ pub fn __worker_drain(worker_id: u32) -> bool {
     fence(Ordering::SeqCst);
     if !slot.local.0.is_empty() || !STATE.injector().is_empty() {
         idle_clear(worker_id);
-        rearm_self(worker_id);
+        rearm_self(thread_id);
     }
+
+    // Reached a safe point: about to return to the JS loop and park in `Atomics.waitAsync`, no
+    // longer touching the deques. Release our `busy` flag so `shutdown` may terminate us.
+    slot.busy.0.store(false, Ordering::SeqCst);
 
     true
 }

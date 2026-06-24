@@ -1,4 +1,4 @@
-use crate::{pool, prelude::*};
+use crate::prelude::*;
 
 pub struct ClosureMarker;
 pub struct FutureMarker;
@@ -6,7 +6,7 @@ pub struct AsyncFnMarker;
 
 pub trait Spawn<M> {
     type Output;
-    fn spawn(self, pool: &ThreadPool) -> Self::Output;
+    fn spawn(self) -> Self::Output;
 }
 
 impl<F, T> Spawn<ClosureMarker> for F
@@ -15,8 +15,8 @@ where
     T: Send + 'static,
 {
     type Output = WorkerHandle<T>;
-    fn spawn(self, _: &ThreadPool) -> WorkerHandle<T> {
-        pool::place_local(move || async move { self() })
+    fn spawn(self) -> WorkerHandle<T> {
+        crate::place_local(move || async move { self() })
     }
 }
 
@@ -26,8 +26,8 @@ where
     T: Send + 'static,
 {
     type Output = WorkerHandle<T>;
-    fn spawn(self, _: &ThreadPool) -> WorkerHandle<T> {
-        pool::place_local(move || self)
+    fn spawn(self) -> WorkerHandle<T> {
+        crate::place_local(move || self)
     }
 }
 
@@ -38,14 +38,14 @@ where
     T: Send + 'static,
 {
     type Output = WorkerHandle<T>;
-    fn spawn(self, _: &ThreadPool) -> Self::Output {
-        pool::place_local(self)
+    fn spawn(self) -> Self::Output {
+        crate::place_local(self)
     }
 }
 
 pub trait SpawnStealable<M> {
     type Output;
-    fn spawn_stealable(self, pool: &ThreadPool) -> Self::Output;
+    fn spawn_stealable(self) -> Self::Output;
 }
 
 impl<Fut, T> SpawnStealable<FutureMarker> for Fut
@@ -54,7 +54,7 @@ where
     T: Send + 'static,
 {
     type Output = WorkerHandle<T>;
-    fn spawn_stealable(self, _: &ThreadPool) -> WorkerHandle<T> {
-        pool::place_stealable(self)
+    fn spawn_stealable(self) -> WorkerHandle<T> {
+        crate::place_stealable(self)
     }
 }

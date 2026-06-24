@@ -46,7 +46,7 @@ impl Future for YieldNow {
 
 async fn flush_microtasks() {
     let p = js_sys::Promise::resolve(&JsValue::UNDEFINED);
-    let _ = wasm_bindgen_futures::JsFuture::from(p).await;
+    _ = wasm_bindgen_futures::JsFuture::from(p).await;
 }
 
 async fn recv<T>(mut h: WorkerHandle<T>) -> T {
@@ -74,4 +74,33 @@ async fn recv_stealable<T>(mut h: WorkerHandle<T>) -> T {
 fn memory_words() -> js_sys::Int32Array {
     let mem = wasm_bindgen::memory().unchecked_into::<js_sys::WebAssembly::Memory>();
     js_sys::Int32Array::new(&mem.buffer())
+}
+
+/// Reset the process-global [`STATE`] to a clean, sized executor for `wasm-bindgen-test`, with
+/// **no** real Web Workers.
+///
+/// Sizes slots + injector + main slot on first use (fixed thereafter, since they are `OnceLock`s —
+/// pass the same `num_workers` in every test), clears all executor state via
+/// [`clear_runtime_state`](crate::pool::clear_runtime_state), and returns the runtime to
+/// [`Lifecycle::Uninit`] so each test starts fresh (and integration tests can `init()` afterward).
+/// Tests drive "virtual worker 0" by hand via `__worker_drain(0)`.
+pub(crate) fn test_reset(num_workers: usize) {
+    use std::sync::atomic::Ordering;
+
+    use crossbeam_deque::Injector;
+
+    use crate::state::{Lifecycle, STATE, Slot};
+
+    // Terminate any real workers a prior test left alive (the old `ThreadPool` did this in `Drop`),
+    // so leftover workers can't consume futex notifies meant for a later test's own waiters.
+    crate::shutdown();
+    // Size the OnceLocks on first use; later calls reuse them.
+    let slots: Box<[Slot]> = (0..num_workers).map(|_| Slot::new()).collect();
+    _ = STATE.slots.set(slots);
+    _ = STATE.injector.set(Injector::new());
+    _ = STATE.main_slot.set(Slot::new());
+    crate::state::clear_runtime_state();
+    STATE
+        .state
+        .store(Lifecycle::Uninit as u8, Ordering::Release);
 }
