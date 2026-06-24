@@ -4,6 +4,8 @@ use std::sync::{Mutex, OnceLock};
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
 
+use crate::worker::ThreadId;
+
 /// Lives in our WASM linear memory (a `SharedArrayBuffer` when compiled with `+atomics`),
 /// so every worker sees this struct.
 pub(crate) static STATE: SharedState = SharedState {
@@ -85,11 +87,10 @@ impl SharedState {
     /// Resolve a worker id (or [`MAIN_ID`]) to its scheduling slot. The futex wake path
     /// (`notify_worker`, `__notify_index`) routes through here so the main thread is woken
     /// exactly like a worker.
-    pub fn slot_for(&'static self, id: u32) -> &'static Slot {
-        if id == MAIN_ID {
-            self.main_slot.get().expect("main slot not initialized")
-        } else {
-            &self.slots()[id as usize]
+    pub fn slot_for(&'static self, id: ThreadId) -> &'static Slot {
+        match id {
+            ThreadId::Main => self.main_slot.get().expect("main slot not initialized"),
+            ThreadId::Worker(id) => &self.slots()[id as usize],
         }
     }
 }
@@ -108,7 +109,7 @@ pub(crate) fn clear_runtime_state() {
         slot.notify.0.store(0, Ordering::Release);
         slot.busy.0.store(false, Ordering::Release);
     }
-    let main = STATE.slot_for(MAIN_ID);
+    let main = STATE.slot_for(ThreadId::Main);
     main.incoming.lock().unwrap().clear();
     main.ready.lock().unwrap().clear();
     while main.local.0.pop().is_some() {}

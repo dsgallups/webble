@@ -218,7 +218,7 @@ where
     T: Send + 'static,
 {
     let (tx, rx) = async_channel::bounded(1);
-    let slot = STATE.slot_for(MAIN_ID);
+    let slot = STATE.slot_for(ThreadId::Main);
 
     let pending = PendingSpawn::new(move |id| {
         // Built and polled on the main thread, exactly like the worker pinned track.
@@ -229,7 +229,7 @@ where
     });
 
     slot.incoming.lock().unwrap().push_back(pending);
-    notify_worker(MAIN_ID);
+    notify_worker(ThreadId::Main);
 
     WorkerHandle::new(rx)
 }
@@ -248,12 +248,12 @@ pub fn shutdown() {
     fence(Ordering::SeqCst);
     if let Some(slots) = STATE.slots.get() {
         for i in 0..slots.len() as u32 {
-            notify_worker(i);
+            notify_worker(ThreadId::Worker(i));
         }
     }
     // Wake the main loop so it observes the shutdown state and stops re-parking.
     if STATE.main_slot.get().is_some() {
-        notify_worker(MAIN_ID);
+        notify_worker(ThreadId::Main);
     }
 
     // Wait for any worker still mid-drain to reach a safe point before terminating it. Killing a
@@ -334,7 +334,7 @@ where
     });
 
     slot.incoming.lock().unwrap().push_back(pending);
-    notify_worker(w);
+    notify_worker(ThreadId::Worker(w));
 
     WorkerHandle::new(rx)
 }
@@ -368,7 +368,7 @@ where
     // outlives the spawn.
     let (runnable, task) = unsafe {
         async_task::Builder::new()
-            .metadata(owner)
+            .metadata(ThreadId::Worker(owner))
             .spawn_unchecked(move |_| fut, schedule)
     };
     // Detach so dropping the JoinHandle does NOT cancel the future (callers fire-and-forget;

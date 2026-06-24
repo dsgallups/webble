@@ -44,7 +44,7 @@ pub(crate) fn start_main_loop() {
 /// [`on_main`] closures. The main thread never runs stealable work (it must not jank the UI) and has
 /// no idle bit, so the worker Dekker handshake is skipped.
 fn drain_main() {
-    let slot = STATE.slot_for(MAIN_ID);
+    let slot = STATE.slot_for(ThreadId::Main);
 
     loop {
         let ptr = slot.ready.lock().unwrap().pop_front();

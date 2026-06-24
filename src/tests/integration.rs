@@ -8,7 +8,7 @@ use crate::{
     spawn::AsyncFnMarker,
     state::Lifecycle,
     tests::{N, set_timeout},
-    worker::{ThreadId, current_thread, thread_id},
+    worker::{ThreadId, thread_id},
 };
 
 /// Reset the shared STATE (which also tears down any workers from a prior test), then start a fresh
@@ -48,10 +48,10 @@ async fn real_workers_execute_on_a_worker_thread() {
         who.is_some(),
         "work must run on a worker (thread_id set), not the main thread"
     );
-    assert!(
-        (who.unwrap() as usize) < N,
-        "thread_id out of range: {who:?}"
-    );
+    let ThreadId::Worker(who) = who.unwrap() else {
+        panic!("thread_id is main!");
+    };
+    assert!((who as usize) < N, "thread_id out of range: {who:?}");
 }
 
 #[wasm_bindgen_test]
@@ -59,8 +59,8 @@ async fn on_main_runs_closure_on_the_main_thread() {
     spawn_real_pool();
 
     let h = crate::spawn(async {
-        let on_worker = current_thread();
-        let on_main = crate::on_main(|| async { current_thread() }).recv().await;
+        let on_worker = thread_id();
+        let on_main = crate::on_main(|| async { thread_id() }).recv().await;
         (on_worker, on_main)
     });
 
@@ -102,7 +102,7 @@ async fn runtime_can_be_shut_down_and_restarted() {
 
     // `on_main` must still reach the main thread after a restart.
     let h = crate::spawn::<AsyncFnMarker, _>(|| async {
-        crate::on_main(|| async { current_thread() }).recv().await
+        crate::on_main(|| async { thread_id() }).recv().await
     });
     assert_eq!(await_result(h).await, Some(Some(ThreadId::Main)));
 }
@@ -130,6 +130,9 @@ async fn real_workers_spread_placement_across_workers() {
     let mut seen: HashSet<u32> = HashSet::new();
     for h in handles {
         if let Some(w) = await_result(h).await {
+            let ThreadId::Worker(w) = w else {
+                panic!("Saw main thread!");
+            };
             seen.insert(w);
         }
     }
@@ -176,10 +179,10 @@ async fn stealable_work_is_claimed_and_runs() {
 
     let who = await_result(crate::spawn_stealable(async { thread_id() })).await;
     assert!(who.is_some(), "stolen work must run on a worker");
-    assert!(
-        (who.unwrap() as usize) < N,
-        "thread_id out of range: {who:?}"
-    );
+    let ThreadId::Worker(who) = who.unwrap() else {
+        panic!("Found main thread");
+    };
+    assert!((who as usize) < N, "thread_id out of range: {who:?}");
 }
 
 #[wasm_bindgen_test]
@@ -241,12 +244,27 @@ async fn stealable_future_parks_and_resumes_to_completion() {
         got, 55,
         "the parked stealable future must resume and complete"
     );
+
     assert!(
-        first.map(|w| (w as usize) < N).unwrap_or(false),
+        first
+            .map(|w| {
+                let ThreadId::Worker(w) = w else {
+                    panic!("found main thread!");
+                };
+                (w as usize) < N
+            })
+            .unwrap_or(false),
         "first-poll thread_id invalid: {first:?}"
     );
     assert!(
-        second.map(|w| (w as usize) < N).unwrap_or(false),
+        second
+            .map(|w| {
+                let ThreadId::Worker(w) = w else {
+                    panic!("found main thread!");
+                };
+                (w as usize) < N
+            })
+            .unwrap_or(false),
         "resume thread_id invalid: {second:?}"
     );
 }

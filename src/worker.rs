@@ -7,14 +7,14 @@ use web_sys::Worker;
 
 use crate::{
     exec::{idle_clear, idle_set, rearm_self, run_runnable_ptr, run_steal_ptr},
-    state::{MAIN_ID, STATE, Slot, StealPtr},
+    state::{STATE, Slot, StealPtr},
 };
 
 /// The runtime thread the current code is running on.
 ///
 /// Every thread that participates in the runtime has an identity: the [`Main`](ThreadId::Main) thread
 /// (the one that called `init`, which runs [`on_main`](crate::on_main) work) and each
-/// [`Worker`](ThreadId::Worker). [`current_thread`] returns `None` only for a thread that is *not*
+/// [`Worker`](ThreadId::Worker). [`thread_id`] returns `None` only for a thread that is *not*
 /// part of the runtime at all — e.g. before `init`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
 pub enum ThreadId {
@@ -22,16 +22,6 @@ pub enum ThreadId {
     Main,
     /// Worker number `0..num_workers`.
     Worker(u32),
-}
-
-impl ThreadId {
-    /// The raw scheduling id: a worker index, or [`MAIN_ID`] for the main thread.
-    pub(crate) fn to_raw(self) -> u32 {
-        match self {
-            ThreadId::Main => MAIN_ID,
-            ThreadId::Worker(i) => i,
-        }
-    }
 }
 
 thread_local! {
@@ -51,25 +41,8 @@ pub(crate) fn set_thread_id(thread: ThreadId) {
 
 /// The current runtime thread, or `None` if this thread is not part of the runtime (e.g. before
 /// `init`, or a thread that is neither a webble worker nor the `init` caller).
-pub fn current_thread() -> Option<ThreadId> {
+pub fn thread_id() -> Option<ThreadId> {
     THREAD.with(|v| v.get())
-}
-
-/// The current **worker index**, or `None` on the main thread / off-runtime. This is the
-/// worker-flavored view of [`current_thread`]; use that to tell the main thread apart from a
-/// non-runtime thread.
-#[cfg(debug_assertions)]
-pub fn thread_id() -> Option<u32> {
-    match current_thread() {
-        Some(ThreadId::Worker(i)) => Some(i),
-        _ => None,
-    }
-}
-
-/// The raw scheduling id (worker index or [`MAIN_ID`]) of the current thread. Internal: the
-/// schedulers use it to decide whether a runnable can run locally.
-pub(crate) fn current_raw() -> Option<u32> {
-    current_thread().map(ThreadId::to_raw)
 }
 
 pub struct ThreadWorker {
@@ -104,7 +77,8 @@ impl ThreadWorker {
 /// **NEVER** call this from the main thread.
 #[wasm_bindgen]
 pub fn __worker_drain(worker_id: u32) -> bool {
-    set_thread_id(ThreadId::Worker(worker_id));
+    let thread_id = ThreadId::Worker(worker_id);
+    set_thread_id(thread_id);
 
     if STATE.is_shutdown() {
         return false;
@@ -172,7 +146,7 @@ pub fn __worker_drain(worker_id: u32) -> bool {
     fence(Ordering::SeqCst);
     if !slot.local.0.is_empty() || !STATE.injector().is_empty() {
         idle_clear(worker_id);
-        rearm_self(worker_id);
+        rearm_self(thread_id);
     }
 
     // Reached a safe point: about to return to the JS loop and park in `Atomics.waitAsync`, no

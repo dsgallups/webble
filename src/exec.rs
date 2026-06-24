@@ -11,7 +11,7 @@ use crate::prelude::*;
 /// A schedulable, worker-pinned task whose metadata is its owner worker id. This alias is canonical:
 /// every `into_raw`/`from_raw` round-trip of a pinned task must use it, or the metadata type
 /// mismatches (UB encounter).
-pub type Run = async_task::Runnable<u32>;
+pub type Run = async_task::Runnable<ThreadId>;
 
 /// A schedulable, stealable task (default `()` metadata. It has no owner, so any worker may poll it).
 pub type Steal = async_task::Runnable;
@@ -28,7 +28,7 @@ thread_local! {
 
 /// Wake the worker `id` if it is parked in `Atomics.waitAsync` on its notify word. Producers MUST
 /// push their work to the queue BEFORE calling this.
-pub fn notify_worker(id: u32) {
+pub fn notify_worker(id: ThreadId) {
     let slot = STATE.slot_for(id);
     slot.notify.0.fetch_add(1, Ordering::Release);
     let _addr = &slot.notify.0 as *const AtomicU32 as *mut i32;
@@ -41,9 +41,17 @@ pub fn notify_worker(id: u32) {
 }
 
 /// The `Int32Array` word index of worker `id`'s notify futex, for JS `Atomics.waitAsync`.
+///
+/// `id` crosses the JS boundary as a raw `u32`: real workers pass their index, the main loop passes
+/// the [`MAIN_ID`] sentinel. Map it back to the right [`ThreadId`] before resolving the slot.
 #[wasm_bindgen]
 pub fn __notify_index(id: u32) -> u32 {
-    let slot = STATE.slot_for(id);
+    let thread = if id == MAIN_ID {
+        ThreadId::Main
+    } else {
+        ThreadId::Worker(id)
+    };
+    let slot = STATE.slot_for(thread);
     let addr = (&slot.notify.0 as *const AtomicU32).expose_provenance();
     (addr / 4) as u32
 }
@@ -123,7 +131,7 @@ pub fn run_steal_ptr(ptr: StealPtr) {
 pub fn schedule(runnable: Run) {
     let owner = *runnable.metadata();
     let ptr = PinnedPtr(runnable.into_raw().as_ptr().expose_provenance() as u32);
-    if current_raw() == Some(owner) {
+    if thread_id() == Some(owner) {
         // Hot path: woken on the owner (a worker, or the main thread for an `on_main` task). Run
         // locally on the owner's microtask queue.
         push_microtask(ptr);
@@ -146,13 +154,15 @@ pub fn schedule(runnable: Run) {
 /// Any worker may then pop and poll it. must also be a plain `fn` (Send + Sync + 'static).
 pub fn schedule_stealable(runnable: Steal) {
     let ptr = StealPtr(runnable.into_raw().as_ptr().expose_provenance() as u32);
-    match current_raw() {
-        // On a worker: push to its local deque for locality. On the main thread (`MAIN_ID`) or
-        // off-runtime: push to the global injector — the main thread has no stealable deque of its
-        // own (it never runs stealable work), and its `local` half is never stolen from.
-        Some(id) if id != MAIN_ID => STATE.slots()[id as usize].local.0.push(ptr),
+
+    // On a worker: push to its local deque for locality. On the main thread (`MAIN_ID`) or
+    // off-runtime: push to the global injector — the main thread has no stealable deque of its
+    // own (it never runs stealable work), and its `local` half is never stolen from.
+    match thread_id() {
+        Some(ThreadId::Worker(id)) => STATE.slots()[id as usize].local.0.push(ptr),
         _ => STATE.injector().push(ptr),
     }
+
     // Order the push BEFORE reading the idle set. Paired with the worker's
     // set-idle-then-recheck in `__worker_drain` (a Dekker handshake over the `idle` bitmask and
     // the queues), this guarantees no lost wakeup: a worker about to park either is seen idle here
@@ -188,7 +198,7 @@ fn wake_one() {
         let w = idle.trailing_zeros();
         let bit = 1u32 << w;
         if STATE.idle.fetch_and(!bit, Ordering::SeqCst) & bit != 0 {
-            notify_worker(w);
+            notify_worker(ThreadId::Worker(w));
             return;
         }
         // Lost the claim (someone else cleared it first) — drop it and try the next idle worker.
@@ -202,7 +212,7 @@ fn wake_one() {
 ///
 /// A synchronous `notify_worker(self)` would spin the loop with no `await` and
 /// starve those, so the wake must run from a microtask.
-pub fn rearm_self(worker_id: u32) {
+pub fn rearm_self(worker_id: ThreadId) {
     debug_assert_eq!(thread_id(), Some(worker_id), "rearm_self off its worker");
     REARM.with(|cell| {
         let mut cell = cell.borrow_mut();

@@ -12,7 +12,7 @@ use crate::state::STATE;
 use crate::tests::{
     N, YieldNow, flush_microtasks, memory_words, recv, recv_stealable, set_timeout,
 };
-use crate::worker::__worker_drain;
+use crate::worker::{__worker_drain, ThreadId};
 
 #[wasm_bindgen_test]
 fn notify_index_is_distinct_per_worker() {
@@ -41,7 +41,7 @@ fn notify_worker_bumps_its_own_word() {
     let before2 = js_sys::Atomics::load(&arr, idx2).unwrap();
     let before3 = js_sys::Atomics::load(&arr, idx3).unwrap();
 
-    notify_worker(2);
+    notify_worker(ThreadId::Worker(2));
 
     assert_eq!(
         js_sys::Atomics::load(&arr, idx2).unwrap(),
@@ -328,7 +328,7 @@ async fn waitasync_is_woken_by_notify_worker() {
         .unchecked_into();
 
     // fire the wake on a later macrotask, after we are already awaiting the promise.
-    let cb = Closure::once(move || notify_worker(1));
+    let cb = Closure::once(move || notify_worker(ThreadId::Worker(1)));
     set_timeout(cb.as_ref().unchecked_ref(), 0);
     cb.forget();
 
